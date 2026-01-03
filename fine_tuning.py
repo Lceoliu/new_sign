@@ -245,6 +245,7 @@ def evaluate(args, data_loader, model, model_without_ddp, phase):
     with torch.no_grad():
         tgt_pres = []
         tgt_refs = []
+        tgt_name = []
  
         for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, 10, header)):
             if target_dtype != None:
@@ -267,6 +268,7 @@ def evaluate(args, data_loader, model, model_without_ddp, phase):
             for i in range(len(output)):
                 tgt_pres.append(output[i])
                 tgt_refs.append(tgt_input['gt_sentence'][i])
+                tgt_name.append(src_input['name_batch'][i])
 
     tokenizer = model_without_ddp.mt5_tokenizer
     padding_value = tokenizer.eos_token_id
@@ -314,10 +316,10 @@ def evaluate(args, data_loader, model, model_without_ddp, phase):
     if utils.is_main_process() and utils.get_world_size() == 1 and args.eval:
         with open(args.output_dir+f'/{phase}_tmp_pres.txt','w') as f:
             for i in range(len(tgt_pres)):
-                f.write(tgt_pres[i]+'\n')
+                f.write(f"sample: {tgt_name[i]}, prediction: " + tgt_pres[i]+'\n')
         with open(args.output_dir+f'/{phase}_tmp_refs.txt','w') as f:
             for i in range(len(tgt_refs)):
-                f.write(tgt_refs[i]+'\n')
+                f.write(f"sample: {tgt_name[i]}, ground-truth: " + tgt_refs[i]+'\n')
         
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
