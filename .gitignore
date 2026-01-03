@@ -9,7 +9,6 @@ wandb
 backup
 *.pth
 #*.txt
-out/
 log/
 *.json
 *.xlsx
