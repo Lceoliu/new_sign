@@ -516,8 +516,6 @@ def get_args_parser():
                         default=0,
                         help='save ckpt per quick_break step')
     
-    # RGB branch
-    parser.add_argument('--rgb_support', action='store_true',)
     
     # Pose length
     parser.add_argument("--max_length", default=256, type=int)
@@ -533,5 +531,10 @@ def get_args_parser():
 
     # online inference
     parser.add_argument("--online_video", default="", type=str)
+
+    # Logging
+    parser.add_argument('--use_wandb', action='store_true', help='使用 wandb 进行日志记录')
+    parser.add_argument('--wandb_project', default='uni-sign', help='wandb 项目名称')
+    parser.add_argument('--wandb_run_name', default=None, help='wandb 运行名称')
 
     return parser

@@ -15,4 +15,3 @@ log/
 *.mp4
 tools/*.jpg
 tools/*.mp4
-pre_training.py

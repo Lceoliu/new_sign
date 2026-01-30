@@ -25,7 +25,6 @@ def main(args):
 
     online_data = S2T_Dataset_online(args=args)
     print(online_data)
-    online_data.rgb_data = args.online_video
     online_data.pose_data = pose_data
 
     online_sampler = torch.utils.data.SequentialSampler(online_data)

@@ -15,6 +15,9 @@ from models import get_requires_grad_dict
 from SLRT_metrics import translation_performance, islr_performance, wer_list
 from transformers import get_scheduler
 from config import *
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 def main(args):
     utils.init_distributed_mode_ds(args)
@@ -22,30 +25,46 @@ def main(args):
     print(args)
     utils.set_seed(args.seed)
 
+    # 初始化日志系统
+    if utils.is_main_process():
+        # TensorBoard 日志
+        tb_writer = SummaryWriter(log_dir=os.path.join(args.output_dir, 'tensorboard'))
+
+        # 可选的 wandb 日志
+        if args.use_wandb:
+            wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name or f"{args.dataset}_{args.task}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                config=vars(args),
+                dir=args.output_dir
+            )
+    else:
+        tb_writer = None
+
     print(f"Creating dataset:")
-        
-    train_data = S2T_Dataset(path=train_label_paths[args.dataset], 
+
+    train_data = S2T_Dataset(path=train_label_paths[args.dataset],
                              args=args, phase='train')
     print(train_data)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_data,shuffle=True)
     train_dataloader = DataLoader(train_data,
-                                 batch_size=args.batch_size, 
-                                 num_workers=args.num_workers, 
+                                 batch_size=args.batch_size,
+                                 num_workers=args.num_workers,
                                  collate_fn=train_data.collate_fn,
-                                 sampler=train_sampler, 
+                                 sampler=train_sampler,
                                  pin_memory=args.pin_mem,
                                  drop_last=True)
-        
-    test_data = S2T_Dataset(path=test_label_paths[args.dataset], 
+
+    test_data = S2T_Dataset(path=test_label_paths[args.dataset],
                             args=args, phase='test')
     print(test_data)
     # test_sampler = torch.utils.data.distributed.DistributedSampler(test_data,shuffle=False)
     test_sampler = torch.utils.data.SequentialSampler(test_data)
     test_dataloader = DataLoader(test_data,
                                  batch_size=args.batch_size,
-                                 num_workers=args.num_workers, 
+                                 num_workers=args.num_workers,
                                  collate_fn=test_data.collate_fn,
-                                 sampler=test_sampler, 
+                                 sampler=test_sampler,
                                  pin_memory=args.pin_mem)
 
     if "How2Sign" not in args.dataset:
@@ -81,7 +100,7 @@ def main(args):
         ret = model.load_state_dict(state_dict, strict=True)
         print('Missing keys: \n', '\n'.join(ret.missing_keys))
         print('Unexpected keys: \n', '\n'.join(ret.unexpected_keys))
-    
+
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -125,7 +144,7 @@ def main(args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         
-        train_stats = train_one_epoch(args, model, train_dataloader, optimizer, epoch)
+        train_stats = train_one_epoch(args, model, train_dataloader, optimizer, epoch, tb_writer)
 
         if args.output_dir:
             checkpoint_paths = [output_dir / f'checkpoint_{epoch}.pth']
@@ -136,8 +155,8 @@ def main(args):
 
         # single gpu inference
         if utils.is_main_process():
-            test_stats = evaluate(args, dev_dataloader, model, model_without_ddp, phase='dev')
-            evaluate(args, test_dataloader, model, model_without_ddp, phase='test')
+            test_stats = evaluate(args, dev_dataloader, model, model_without_ddp, phase='dev', tb_writer=tb_writer, epoch=epoch)
+            evaluate(args, test_dataloader, model, model_without_ddp, phase='test', tb_writer=tb_writer, epoch=epoch)
 
             if args.task == "SLT":
                 if max_accuracy < test_stats["bleu4"]:
@@ -191,7 +210,7 @@ def main(args):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
-def train_one_epoch(args, model, data_loader, optimizer, epoch):
+def train_one_epoch(args, model, data_loader, optimizer, epoch, tb_writer=None):
     model.train()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -204,7 +223,14 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
     if model.bfloat16_enabled():
         target_dtype = torch.bfloat16
 
-    for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    # 使用 tqdm 进度条
+    if utils.is_main_process():
+        pbar = tqdm(data_loader, desc=f"训练 Epoch {epoch}/{args.epochs}", leave=False)
+        data_iter = enumerate(pbar)
+    else:
+        data_iter = enumerate(data_loader)
+
+    for step, (src_input, tgt_input) in data_iter:
         if target_dtype != None:
             for key in src_input.keys():
                 if isinstance(src_input[key], torch.Tensor):
@@ -213,7 +239,7 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
         if args.task == "CSLR":
             tgt_input['gt_sentence'] = tgt_input['gt_gloss']
         stack_out = model(src_input, tgt_input)
-        
+
         total_loss = stack_out['loss']
         model.backward(total_loss)
         model.step()
@@ -222,9 +248,31 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
-            
+
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
+        # 更新 tqdm 进度条
+        if utils.is_main_process():
+            pbar.set_postfix({
+                'loss': f'{loss_value:.4f}',
+                'lr': f'{optimizer.param_groups[0]["lr"]:.6f}'
+            })
+
+            # 记录到 TensorBoard
+            if tb_writer is not None:
+                global_step = epoch * len(data_loader) + step
+                tb_writer.add_scalar('Train/Loss', loss_value, global_step)
+                tb_writer.add_scalar('Train/LearningRate', optimizer.param_groups[0]["lr"], global_step)
+
+            # 记录到 wandb
+            if args.use_wandb:
+                wandb.log({
+                    'train/loss': loss_value,
+                    'train/lr': optimizer.param_groups[0]["lr"],
+                    'epoch': epoch,
+                    'step': epoch * len(data_loader) + step
+                })
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -232,36 +280,47 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
 
     return  {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-def evaluate(args, data_loader, model, model_without_ddp, phase):
+def evaluate(args, data_loader, model, model_without_ddp, phase, tb_writer=None, epoch=None):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Test:'
+    header = f'{phase.capitalize()}:'
 
     target_dtype = None
     if model.bfloat16_enabled():
         target_dtype = torch.bfloat16
-        
+
+    # 使用 tqdm 进度条
+    if utils.is_main_process():
+        pbar = tqdm(data_loader, desc=f"评估 {phase}", leave=False)
+        data_iter = enumerate(pbar)
+    else:
+        data_iter = enumerate(data_loader)
+
     with torch.no_grad():
         tgt_pres = []
         tgt_refs = []
         tgt_name = []
- 
-        for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+
+        for step, (src_input, tgt_input) in data_iter:
             if target_dtype != None:
                 for key in src_input.keys():
                     if isinstance(src_input[key], torch.Tensor):
                         src_input[key] = src_input[key].to(target_dtype).cuda()
-            
+
             if args.task == "CSLR":
                 tgt_input['gt_sentence'] = tgt_input['gt_gloss']
             stack_out = model(src_input, tgt_input)
-            
+
             total_loss = stack_out['loss']
             metric_logger.update(loss=total_loss.item())
-        
-            output = model_without_ddp.generate(stack_out, 
-                                                max_new_tokens=100, 
+
+            # 更新 tqdm 进度条
+            if utils.is_main_process():
+                pbar.set_postfix({'loss': f'{total_loss.item():.4f}'})
+
+            output = model_without_ddp.generate(stack_out,
+                                                max_new_tokens=100,
                                                 num_beams = 4,
                         )
 
