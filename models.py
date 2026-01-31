@@ -4,6 +4,7 @@ from torch import nn
 import torch.utils.checkpoint
 import contextlib
 from einops import rearrange
+import torch.nn.functional as F
 
 import math
 from stgcn_layers import Graph, get_stgcn_chain
@@ -67,13 +68,134 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     """
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
+
+class VectorQuantizer(nn.Module):
+    """
+    Vector Quantization layer for pose tokenization.
+    """
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25):
+        super(VectorQuantizer, self).__init__()
+
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.commitment_cost = commitment_cost
+
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
+
+    def forward(self, inputs):
+        # Convert inputs from BCHW -> BHWC
+        input_shape = inputs.shape
+        flat_input = inputs.view(-1, self.embedding_dim)
+
+        # Calculate distances
+        distances = (torch.sum(flat_input**2, dim=1, keepdim=True)
+                    + torch.sum(self.embedding.weight**2, dim=1)
+                    - 2 * torch.matmul(flat_input, self.embedding.weight.t()))
+
+        # Encoding
+        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
+        encodings = torch.zeros(encoding_indices.shape[0], self.num_embeddings, device=inputs.device)
+        encodings.scatter_(1, encoding_indices, 1)
+
+        # Quantize and unflatten
+        quantized = torch.matmul(encodings, self.embedding.weight).view(input_shape)
+
+        # Loss
+        e_latent_loss = F.mse_loss(quantized.detach(), inputs)
+        q_latent_loss = F.mse_loss(quantized, inputs.detach())
+        loss = q_latent_loss + self.commitment_cost * e_latent_loss
+
+        quantized = inputs + (quantized - inputs).detach()
+        avg_probs = torch.mean(encodings, dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+
+        return quantized, loss, perplexity, encoding_indices.squeeze()
+
+
+class ResidualVectorQuantizer(nn.Module):
+    """
+    Residual Vector Quantizer for hierarchical pose tokenization.
+    """
+    def __init__(self, num_quantizers=4, num_embeddings=1024, embedding_dim=256, commitment_cost=0.25):
+        super(ResidualVectorQuantizer, self).__init__()
+
+        self.num_quantizers = num_quantizers
+        self.quantizers = nn.ModuleList([
+            VectorQuantizer(num_embeddings, embedding_dim, commitment_cost)
+            for _ in range(num_quantizers)
+        ])
+
+    def forward(self, x):
+        quantized_out = 0.0
+        residual = x
+
+        all_losses = []
+        all_indices = []
+        all_perplexities = []
+
+        for quantizer in self.quantizers:
+            quantized, loss, perplexity, indices = quantizer(residual)
+            residual = residual - quantized
+            quantized_out = quantized_out + quantized
+
+            all_losses.append(loss)
+            all_indices.append(indices)
+            all_perplexities.append(perplexity)
+
+        avg_loss = torch.mean(torch.stack(all_losses))
+        avg_perplexity = torch.mean(torch.stack(all_perplexities))
+
+        return quantized_out, avg_loss, avg_perplexity, all_indices
+
+
+class PoseTokenizer(nn.Module):
+    """
+    Pose Tokenizer that integrates with existing ST-GCN architecture.
+    """
+    def __init__(self, input_dim=256, hidden_dim=256, num_quantizers=4,
+                 num_embeddings=1024, commitment_cost=0.25):
+        super(PoseTokenizer, self).__init__()
+
+        # Pre-quantization projection
+        self.pre_quant_conv = nn.Conv1d(input_dim, hidden_dim, 1)
+
+        # Residual Vector Quantizer
+        self.quantizer = ResidualVectorQuantizer(
+            num_quantizers=num_quantizers,
+            num_embeddings=num_embeddings,
+            embedding_dim=hidden_dim,
+            commitment_cost=commitment_cost
+        )
+
+        # Post-quantization projection
+        self.post_quant_conv = nn.Conv1d(hidden_dim, input_dim, 1)
+
+    def forward(self, x):
+        # x shape: (B, T, C) -> (B, C, T) for conv1d
+        x = x.transpose(1, 2)
+
+        # Pre-quantization
+        h = self.pre_quant_conv(x)
+        h = h.transpose(1, 2)  # (B, T, C) for quantizer
+
+        # Quantization
+        quantized, vq_loss, perplexity, indices = self.quantizer(h)
+
+        # Post-quantization
+        quantized = quantized.transpose(1, 2)  # (B, C, T)
+        decoded = self.post_quant_conv(quantized)
+        decoded = decoded.transpose(1, 2)  # (B, T, C)
+
+        return decoded, vq_loss, perplexity, indices
+
 class Uni_Sign(nn.Module):
     def __init__(self, args):
         super(Uni_Sign, self).__init__()
         self.args = args
-        
+
         self.modes = ['body', 'left', 'right', 'face_all']
-        
+
         self.graph, A = {}, []
         # project (x,y,score) to hidden dim
         hidden_dim = args.hidden_dim
@@ -89,13 +211,24 @@ class Uni_Sign(nn.Module):
         for index, mode in enumerate(self.modes):
             self.gcn_modules[mode], final_dim = get_stgcn_chain(64, 'spatial', (1, spatial_kernel_size), A[index].clone(), True)
             self.fusion_gcn_modules[mode], _ = get_stgcn_chain(final_dim, 'temporal', (5, spatial_kernel_size), A[index].clone(), True)
-        
+
         self.gcn_modules['left'] = self.gcn_modules['right']
         self.fusion_gcn_modules['left'] = self.fusion_gcn_modules['right']
         self.proj_linear['left'] = self.proj_linear['right']
 
         self.part_para = nn.Parameter(torch.zeros(hidden_dim*len(self.modes)))
         self.pose_proj = nn.Linear(256*4, 768)
+
+        # Pose Tokenizer components (optional, controlled by args)
+        self.use_pose_tokenizer = getattr(args, 'use_pose_tokenizer', False)
+        if self.use_pose_tokenizer:
+            self.pose_tokenizer = PoseTokenizer(
+                input_dim=256*4,  # concatenated features from all modes
+                hidden_dim=getattr(args, 'tokenizer_hidden_dim', 256),
+                num_quantizers=getattr(args, 'num_quantizers', 4),
+                num_embeddings=getattr(args, 'codebook_size', 1024),
+                commitment_cost=getattr(args, 'commitment_cost', 0.25)
+            )
         
         self.apply(self._init_weights)
         
@@ -161,9 +294,17 @@ class Uni_Sign(nn.Module):
             gcn_feat = self.fusion_gcn_modules[part](gcn_feat) #B,C,T,V
             pool_feat = gcn_feat.mean(-1).transpose(1,2) #B,T,C
             features.append(pool_feat)
-        
+
         # concat sub-pose feature across token dimension
         inputs_embeds = torch.cat(features, dim=-1) + self.part_para
+
+        # Apply pose tokenizer if enabled
+        vq_loss = None
+        if self.use_pose_tokenizer:
+            # Apply pose tokenizer before final projection
+            tokenized_embeds, vq_loss, perplexity, indices = self.pose_tokenizer(inputs_embeds)
+            inputs_embeds = tokenized_embeds
+
         inputs_embeds = self.pose_proj(inputs_embeds)
 
         prefix_token = self.mt5_tokenizer(
@@ -172,33 +313,38 @@ class Uni_Sign(nn.Module):
                                 truncation=True,
                                 return_tensors="pt",
                             ).to(inputs_embeds.device)
-        
+
         prefix_embeds = self.mt5_model.encoder.embed_tokens(prefix_token['input_ids'])
         inputs_embeds = torch.cat([prefix_embeds, inputs_embeds], dim=1)
 
         attention_mask = torch.cat([prefix_token['attention_mask'],
                                     src_input['attention_mask']], dim=1)
 
-        tgt_input_tokenizer = self.mt5_tokenizer(tgt_input['gt_sentence'], 
-                                                return_tensors="pt", 
+        tgt_input_tokenizer = self.mt5_tokenizer(tgt_input['gt_sentence'],
+                                                return_tensors="pt",
                                                 padding=True,
                                                 truncation=True,
                                                 max_length=50)
-            
+
         labels = tgt_input_tokenizer['input_ids']
         labels[labels == self.mt5_tokenizer.pad_token_id] = -100
-        
+
         out = self.mt5_model(inputs_embeds = inputs_embeds,
                     attention_mask = attention_mask,
                     labels = labels.to(inputs_embeds.device),
                     return_dict = True,
                     )
-        
+
         label = labels.reshape(-1)
         out_logits = out['logits']
         logits = out_logits.reshape(-1,out_logits.shape[-1])
         loss_fct = torch.nn.CrossEntropyLoss(label_smoothing=self.args.label_smoothing, ignore_index=-100)
         loss = loss_fct(logits, label.to(out_logits.device, non_blocking=True))
+
+        # Add VQ loss if pose tokenizer is used
+        if vq_loss is not None:
+            vq_weight = getattr(self.args, 'vq_loss_weight', 1.0)
+            loss = loss + vq_weight * vq_loss
 
         stack_out = {
             # use for inference
@@ -206,6 +352,14 @@ class Uni_Sign(nn.Module):
             'attention_mask':attention_mask,
             'loss':loss,
         }
+
+        # Add VQ-specific outputs if pose tokenizer is used
+        if self.use_pose_tokenizer:
+            stack_out.update({
+                'vq_loss': vq_loss,
+                'perplexity': perplexity,
+                'quantized_indices': indices
+            })
 
         return stack_out
     

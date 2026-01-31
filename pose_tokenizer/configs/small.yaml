@@ -1,0 +1,66 @@
+# Pose Tokenizer Configuration for Small Dataset
+
+# Model Architecture
+num_keypoints: 133
+keypoint_dim: 3
+sequence_length: 32  # Shorter sequences for faster training
+hidden_dim: 128      # Smaller model
+num_layers: 3
+
+# ST-GCN Encoder
+stgcn_channels: [32, 64, 128]  # Smaller channels
+stgcn_temporal_kernels: [9, 5, 3]
+stgcn_dropout: 0.1
+
+# RVQ Tokenizer
+num_quantizers: 2    # Fewer quantizers
+codebook_size: 512   # Smaller codebook
+commitment_cost: 0.25
+decay: 0.99
+epsilon: 1e-5
+
+# Decoder
+decoder_channels: [128, 64, 32]
+decoder_dropout: 0.1
+
+# Training Parameters
+batch_size: 16      # Smaller batch size
+num_epochs: 50      # Fewer epochs for quick training
+learning_rate: 2e-4 # Higher learning rate
+weight_decay: 1e-5
+gradient_clip_norm: 1.0
+
+# Loss Weights
+reconstruction_weight: 1.0
+quantization_weight: 1.0
+perceptual_weight: 0.0  # Disable for faster training
+temporal_weight: 0.1
+adversarial_weight: 0.0 # Disable for faster training
+
+# Optimizer
+optimizer_type: "adamw"
+beta1: 0.9
+beta2: 0.999
+
+# Scheduler
+scheduler_type: "cosine"
+warmup_epochs: 5
+min_lr: 1e-6
+
+# Data
+data_dir: "data/processed"
+normalize_poses: true
+augment_data: true
+num_workers: 2
+
+# Training Settings
+use_amp: true
+distributed: false
+val_interval: 5
+log_interval: 50
+save_interval: 10
+
+# Paths
+checkpoint_dir: "checkpoints/small"
+log_dir: "logs/small"
+output_dir: "outputs/small"

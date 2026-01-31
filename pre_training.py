@@ -177,8 +177,19 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch, model_without_dd
                     src_input[key] = src_input[key].to(target_dtype).cuda()
 
         stack_out = model(src_input, tgt_input)
-        
+
         total_loss = stack_out['loss']
+
+        # Log additional metrics if pose tokenizer is enabled
+        if hasattr(args, 'use_pose_tokenizer') and args.use_pose_tokenizer:
+            vq_loss = stack_out.get('vq_loss', torch.tensor(0.0))
+            perplexity = stack_out.get('perplexity', torch.tensor(0.0))
+
+            if isinstance(vq_loss, torch.Tensor):
+                metric_logger.update(vq_loss=vq_loss.item())
+            if isinstance(perplexity, torch.Tensor):
+                metric_logger.update(perplexity=perplexity.item())
+
         model.backward(total_loss)
         model.step()
 
@@ -186,7 +197,7 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch, model_without_dd
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
-            
+
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
@@ -219,6 +230,16 @@ def evaluate(args, data_loader, model, model_without_ddp):
             stack_out = model(src_input, tgt_input)
             total_loss = stack_out['loss']
             metric_logger.update(loss=total_loss.item())
+
+            # Log additional metrics if pose tokenizer is enabled
+            if hasattr(args, 'use_pose_tokenizer') and args.use_pose_tokenizer:
+                vq_loss = stack_out.get('vq_loss', torch.tensor(0.0))
+                perplexity = stack_out.get('perplexity', torch.tensor(0.0))
+
+                if isinstance(vq_loss, torch.Tensor):
+                    metric_logger.update(vq_loss=vq_loss.item())
+                if isinstance(perplexity, torch.Tensor):
+                    metric_logger.update(perplexity=perplexity.item())
         
             output = model_without_ddp.generate(stack_out, 
                                                 max_new_tokens=100, 

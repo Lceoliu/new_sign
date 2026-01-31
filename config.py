@@ -43,3 +43,24 @@ pose_dirs = {
             "How2Sign": "./dataset/WLASL/pose_format",
             "OpenASL": "./dataset/WLASL/pose_format",
 }
+
+# Pose Tokenizer Configuration
+POSE_TOKENIZER_CONFIG = {
+    # Whether to use pose tokenizer
+    'use_pose_tokenizer': False,
+
+    # Tokenizer architecture parameters
+    'tokenizer_hidden_dim': 256,
+    'num_quantizers': 4,
+    'codebook_size': 1024,
+    'commitment_cost': 0.25,
+
+    # Training parameters
+    'vq_loss_weight': 1.0,
+    'tokenizer_lr': 1e-4,
+    'tokenizer_warmup_epochs': 5,
+
+    # Evaluation parameters
+    'log_codebook_usage': True,
+    'save_quantized_features': False,
+}

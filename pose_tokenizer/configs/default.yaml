@@ -1,0 +1,78 @@
+# Pose Tokenizer Configuration
+
+# Model Architecture
+num_keypoints: 133
+keypoint_dim: 3
+sequence_length: 64
+hidden_dim: 256
+num_layers: 4
+
+# ST-GCN Encoder
+stgcn_channels: [64, 128, 256]
+stgcn_temporal_kernels: [9, 5, 3]
+stgcn_dropout: 0.1
+
+# RVQ Tokenizer
+num_quantizers: 4
+codebook_size: 1024
+commitment_cost: 0.25
+decay: 0.99
+epsilon: 1e-5
+
+# Decoder
+decoder_channels: [256, 128, 64]
+decoder_dropout: 0.1
+
+# Training Parameters
+batch_size: 32
+num_epochs: 100
+learning_rate: 1e-4
+weight_decay: 1e-5
+gradient_clip_norm: 1.0
+
+# Loss Weights
+reconstruction_weight: 1.0
+quantization_weight: 1.0
+perceptual_weight: 0.1
+temporal_weight: 0.1
+adversarial_weight: 0.01
+
+# Optimizer
+optimizer_type: "adamw"  # adam, adamw, sgd
+beta1: 0.9
+beta2: 0.999
+momentum: 0.9
+
+# Scheduler
+scheduler_type: "warmup_cosine"  # cosine, step, exponential, warmup_cosine
+warmup_epochs: 10
+min_lr: 1e-6
+step_size: 30
+gamma: 0.1
+
+# Data
+data_dir: "data/processed"
+normalize_poses: true
+augment_data: true
+num_workers: 4
+
+# Training Settings
+use_amp: true
+distributed: false
+val_interval: 1
+log_interval: 100
+save_interval: 10
+
+# Paths
+checkpoint_dir: "checkpoints"
+log_dir: "logs"
+output_dir: "outputs"
+
+# Evaluation
+eval_batch_size: 64
+eval_num_samples: 1000
+
+# Export Settings
+export_format: "onnx"  # onnx, torchscript, both
+export_dynamic_axes: true
+export_opset_version: 11

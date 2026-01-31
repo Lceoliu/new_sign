@@ -1,0 +1,70 @@
+# Pose Tokenizer Configuration for Large Dataset
+
+# Model Architecture
+num_keypoints: 133
+keypoint_dim: 3
+sequence_length: 128  # Longer sequences for better temporal modeling
+hidden_dim: 512       # Larger model
+num_layers: 6
+
+# ST-GCN Encoder
+stgcn_channels: [128, 256, 512]  # Larger channels
+stgcn_temporal_kernels: [9, 5, 3]
+stgcn_dropout: 0.2
+
+# RVQ Tokenizer
+num_quantizers: 8     # More quantizers for better quality
+codebook_size: 2048   # Larger codebook
+commitment_cost: 0.25
+decay: 0.99
+epsilon: 1e-5
+
+# Decoder
+decoder_channels: [512, 256, 128]
+decoder_dropout: 0.2
+
+# Training Parameters
+batch_size: 64       # Larger batch size
+num_epochs: 200      # More epochs for convergence
+learning_rate: 5e-5  # Lower learning rate for stability
+weight_decay: 1e-4
+gradient_clip_norm: 1.0
+
+# Loss Weights
+reconstruction_weight: 1.0
+quantization_weight: 1.0
+perceptual_weight: 0.2  # Higher perceptual weight
+temporal_weight: 0.2
+adversarial_weight: 0.05
+
+# Optimizer
+optimizer_type: "adamw"
+beta1: 0.9
+beta2: 0.999
+
+# Scheduler
+scheduler_type: "warmup_cosine"
+warmup_epochs: 20
+min_lr: 1e-7
+
+# Data
+data_dir: "data/processed"
+normalize_poses: true
+augment_data: true
+num_workers: 8
+
+# Training Settings
+use_amp: true
+distributed: true
+val_interval: 1
+log_interval: 200
+save_interval: 5
+
+# Paths
+checkpoint_dir: "checkpoints/large"
+log_dir: "logs/large"
+output_dir: "outputs/large"
+
+# Evaluation
+eval_batch_size: 32
+eval_num_samples: 5000
